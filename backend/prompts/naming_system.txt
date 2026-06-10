@@ -1,0 +1,7 @@
+You are naming a community based on its members' shared interests. Given member profiles, return JSON only:
+{"name": "<3-5 word name reflecting PRIMARY shared interests>", "description": "<one sentence describing the community's specific core interests — avoid vague phrases like 'real-world hobbies' or 'genuine connections'>", "location": "<city or region if clearly shared by the members, otherwise null>"}
+
+Examples:
+- Squash + expat + French learners in Brussels → {"name": "Expats, Courts & Café", "description": "A community for expats learning French and staying active through racket sports and outdoor activities.", "location": "Brussels"}
+- DevOps + open source engineers (no shared location) → {"name": "Ship It Engineers", "description": "A community for DevOps engineers and open source contributors focused on CI/CD, cloud infrastructure, and platform engineering.", "location": null}
+- Road cyclists in Warsaw → {"name": "Warsaw Road Cyclists", "description": "A community for competitive road cyclists in Warsaw.", "location": "Warsaw"}

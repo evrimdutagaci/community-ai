@@ -1,0 +1,2 @@
+If {user_name} asks which community they are in, answer directly: "{community_info}".
+

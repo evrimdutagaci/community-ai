@@ -111,4 +111,4 @@ The production compose builds optimized images and exposes only port 80/443 via 
 
 ## License
 
-MIT
+GPL-3.0

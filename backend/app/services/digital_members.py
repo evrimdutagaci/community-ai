@@ -13,6 +13,15 @@ from .guardrails import wrap_user_content, validate_output
 from .community_tools import TOOL_SCHEMAS, execute_tool
 from .event_tools import EVENT_TOOL_SCHEMAS, execute_event_tool
 from .metrics import metrics
+from .prompts import (
+    DIGITAL_MEMBER_DM_BASE,
+    DIGITAL_MEMBER_DM_TOOLS,
+    DIGITAL_MEMBER_DM_NO_TOOLS,
+    DIGITAL_MEMBER_DM_FOOTER,
+    DIGITAL_MEMBER_CHAT_BASE,
+    DIGITAL_MEMBER_CHAT_TOOLS,
+    DIGITAL_MEMBER_CHAT_FOOTER,
+)
 
 client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
 
@@ -131,36 +140,27 @@ async def generate_dm_response_stream(
 
         has_tools = db is not None and bool(community_ids)
 
-        system = (
-            f"You are {name}, a digital (AI) community member in a private one-on-one chat.\n"
-            f"Be upfront about being digital/AI if asked — never pretend to be human.\n\n"
-            f"Your personality: {persona['persona']}\n\n"
-            f"== Facts about the person you're chatting with ==\n"
-            f"Name: {user_name}\n"
-            f"Profile: {real_user.profile_summary or 'Not shared yet.'}\n"
-            f"Current community: {community_info}\n\n"
+        system = DIGITAL_MEMBER_DM_BASE.format(
+            name=name,
+            persona=persona["persona"],
+            user_name=user_name,
+            profile_summary=real_user.profile_summary or "Not shared yet.",
+            community_info=community_info,
         )
 
         if has_tools:
             location_hint = f"'{community_location}'" if community_location else "the location implied by the community name"
-            system += (
-                f"You have real internet-connected tools. NEVER say you cannot access links, search the web, "
-                f"or find events — that is false. You MUST call tools instead of guessing or answering from memory:\n"
-                f"- search_local_events: call this IMMEDIATELY whenever {user_name} asks about meetups, "
-                f"events, groups, or anything happening outside this community. "
-                f"Use {location_hint} as the location and the relevant topic as query. "
-                f"Share the returned URLs directly — do not say you cannot provide links.\n"
-                f"- Community tools (get_recent_messages, get_community_members, search_messages, get_community_activity): "
-                f"use for anything about this community's discussions, members, or activity.\n"
-                f"- save_to_calendar: use when {user_name} wants to save an event.\n"
-                f"Never describe or suggest events from memory — always call search_local_events first.\n\n"
+            system += DIGITAL_MEMBER_DM_TOOLS.format(
+                user_name=user_name,
+                location_hint=location_hint,
             )
         else:
-            system += (
-                f"If {user_name} asks which community they are in, answer directly: \"{community_info}\".\n\n"
+            system += DIGITAL_MEMBER_DM_NO_TOOLS.format(
+                user_name=user_name,
+                community_info=community_info,
             )
 
-        system += "Keep replies to 1-3 sentences. No bullet points. No filler phrases."
+        system += DIGITAL_MEMBER_DM_FOOTER
 
         if recent_messages:
             context = "\n".join(
@@ -236,31 +236,17 @@ async def generate_response_stream(
         has_tools = db is not None and bool(community_ids)
         location_hint = f"'{community.location}'" if community.location else "the location implied by the community name"
 
-        system = (
-            f"You are {name}, a digital (AI) community member. "
-            f"Be upfront about being digital/AI if asked — never pretend to be human.\n\n"
-            f"Your personality: {persona['persona']}\n\n"
-            f"Community: \"{community.name}\" — {community.description or 'a shared interest community'}\n\n"
+        system = DIGITAL_MEMBER_CHAT_BASE.format(
+            name=name,
+            persona=persona["persona"],
+            community_name=community.name,
+            community_description=community.description or "a shared interest community",
         )
 
         if has_tools:
-            system += (
-                f"You have real internet-connected tools. NEVER say you cannot access links, search the web, "
-                f"or find events — that is false. ALWAYS call tools instead of guessing or answering from memory:\n"
-                f"- search_local_events: call this IMMEDIATELY whenever anyone asks about meetups, "
-                f"events, groups, or anything happening outside this community. "
-                f"Use {location_hint} as the location and the relevant topic as query. "
-                f"Share the returned URLs directly — do not say you cannot provide links.\n"
-                f"- Community tools (get_recent_messages, get_community_members, search_messages, get_community_activity): "
-                f"use for questions about this community's discussions, members, or activity.\n"
-                f"- save_to_calendar: use when someone wants to save an event.\n"
-                f"Never describe or suggest events from memory — always call search_local_events first.\n\n"
-            )
+            system += DIGITAL_MEMBER_CHAT_TOOLS.format(location_hint=location_hint)
 
-        system += (
-            f"Keep replies concise (1–3 sentences), natural, and genuinely engaged with the topic. "
-            f"Avoid filler phrases like 'Great question!' or 'Absolutely!'"
-        )
+        system += DIGITAL_MEMBER_CHAT_FOOTER
 
         if recent_messages:
             context = "\n".join(

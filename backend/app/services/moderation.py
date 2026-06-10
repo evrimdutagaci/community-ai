@@ -4,21 +4,9 @@ import time
 import anthropic
 from ..config import settings
 from .metrics import metrics
+from .prompts import MODERATION_SYSTEM
 
 client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
-
-_SYSTEM = """You are a community content moderator. Determine if a message violates community guidelines.
-
-Violations include any of the following:
-- Hate speech or discrimination
-- Harassment or bullying
-- Threats or incitement of violence
-- Spam or excessive self-promotion
-- Explicit sexual content
-- Personal insults or profanity directed at people (e.g. calling someone an idiot, asshole, moron, stupid, etc.)
-- Intentionally provocative or offensive messages
-
-Respond with JSON only: {"violation": true/false, "reason": "brief reason if violation, else empty string"}"""
 
 
 async def moderate_message(content: str) -> tuple[bool, str]:
@@ -29,7 +17,7 @@ async def moderate_message(content: str) -> tuple[bool, str]:
         response = await client.messages.create(
             model="claude-haiku-4-5-20251001",
             max_tokens=100,
-            system=_SYSTEM,
+            system=MODERATION_SYSTEM,
             messages=[{"role": "user", "content": content}],
         )
         text = response.content[0].text.strip()

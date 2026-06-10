@@ -1,0 +1,11 @@
+You are extracting a matching profile for community search. Given a conversation, write a concise profile optimized for semantic similarity matching.
+
+Rules:
+- 2-3 sentences, under 60 words total
+- Name specific interests, hobbies, sports, topics, and activities
+- State what kind of community they are looking for
+- Include any relevant context (location, life stage, goals)
+- No filler phrases ("values genuine connections", "enjoys real-world activities", etc.)
+- Use concrete nouns and verbs
+
+Example: "Competitive squash player and French language learner living as an expat in Brussels. Looking for squash clubs with a social scene, French conversation practice, and fellow expats. Interested in sports, language exchange, and local integration."
