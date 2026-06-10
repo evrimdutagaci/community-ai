@@ -54,7 +54,7 @@ async def my_memberships(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Return all communities the current user belongs to."""
+    """Return all communities the current user belongs to, ordered by join date."""
     result = await db.execute(
         select(Community)
         .join(CommunityMembership, CommunityMembership.community_id == Community.id)
@@ -85,11 +85,12 @@ async def my_community(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    # community_id param lets the frontend request a specific community; default to the user's primary
     target_id = community_id or (str(current_user.community_id) if current_user.community_id else None)
     if not target_id:
         raise HTTPException(status_code=404, detail="Not assigned to a community yet")
 
-    # Verify membership
+    # Verify the user actually holds a membership — prevents viewing communities they left
     mem_check = await db.execute(
         select(CommunityMembership).where(
             CommunityMembership.user_id == current_user.id,
@@ -104,6 +105,7 @@ async def my_community(
     if not community:
         raise HTTPException(status_code=404, detail="Community not found")
 
+    # Return both real and digital members so the frontend can distinguish them
     members_result = await db.execute(
         select(User).where(User.community_id == community.id, User.is_digital.is_(True))
     )
@@ -136,7 +138,7 @@ async def leave_community(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    # Verify membership exists
+    # Verify membership exists before attempting deletion
     mem_result = await db.execute(
         select(CommunityMembership).where(
             CommunityMembership.user_id == current_user.id,
@@ -153,7 +155,7 @@ async def leave_community(
         )
     )
 
-    # Find remaining memberships
+    # Update the primary community pointer to another membership, or reset onboarding if the last one
     remaining = await db.execute(
         select(CommunityMembership).where(CommunityMembership.user_id == current_user.id)
     )
@@ -162,6 +164,7 @@ async def leave_community(
     if other:
         current_user.community_id = other[0].community_id
     else:
+        # No memberships left — fully reset so the user re-enters onboarding
         current_user.community_id = None
         current_user.onboarding_complete = False
         current_user.profile_summary = None
@@ -177,7 +180,10 @@ async def start_community_search(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Begin searching for a new community while staying in the current one."""
+    """
+    Reset the user's onboarding state so they can search for a new community.
+    The user keeps all existing memberships — this only triggers a fresh onboarding flow.
+    """
     current_user.onboarding_complete = False
     current_user.profile_summary = None
     current_user.embedding = None
@@ -192,6 +198,7 @@ async def get_announcements(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    # Only members can see a community's announcements
     mem_check = await db.execute(
         select(CommunityMembership).where(
             CommunityMembership.user_id == current_user.id,
@@ -206,6 +213,7 @@ async def get_announcements(
     if not community:
         raise HTTPException(status_code=404, detail="Community not found")
 
+    # fetch_and_store_announcements is idempotent — skips the API call if today's data already exists
     await fetch_and_store_announcements(community, db)
     return await get_today_announcements(community_id, db)
 
@@ -215,6 +223,6 @@ async def trigger_recluster(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Manually trigger k-means re-clustering of all users."""
+    """Manually trigger k-means re-clustering of all users (admin/debug use)."""
     await recluster_all(db)
     return {"status": "reclustered"}

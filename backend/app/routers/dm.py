@@ -18,6 +18,8 @@ router = APIRouter(tags=["dm"])
 
 
 class DmManager:
+    """WebSocket room manager for direct messages. Rooms are keyed by sorted user ID pairs."""
+
     def __init__(self):
         self._rooms: dict[str, list[tuple[WebSocket, str, str]]] = {}
 
@@ -32,6 +34,7 @@ class DmManager:
             ]
 
     async def broadcast(self, room_id: str, payload: dict):
+        """Broadcast to both sides of the DM conversation; remove stale connections silently."""
         dead = []
         for ws, username, user_id in self._rooms.get(room_id, []):
             try:
@@ -46,6 +49,7 @@ dm_manager = DmManager()
 
 
 async def _user_from_token(token: str, db: AsyncSession) -> User | None:
+    """Validate a JWT passed as a WebSocket query parameter and return the user."""
     try:
         payload = jwt.decode(token, settings.secret_key, algorithms=[settings.algorithm])
         user_id: str | None = payload.get("sub")
@@ -62,6 +66,7 @@ async def list_conversations(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    """Return the most recent message per unique conversation partner, sorted by recency."""
     result = await db.execute(
         select(DirectMessage)
         .where(
@@ -74,6 +79,7 @@ async def list_conversations(
     )
     messages = result.scalars().all()
 
+    # De-duplicate: keep only the first (most recent) message per conversation partner
     seen: set[UUID] = set()
     conversations = []
     for msg in messages:
@@ -116,11 +122,11 @@ async def dm_ws(
         await websocket.close(code=4004)
         return
 
-    # Canonical room ID so both sides join the same room
+    # Room ID is a sorted join of both user IDs — ensures the same room regardless of who opens the chat first
     room_id = "_".join(sorted([str(user.id), other_user_id]))
     await dm_manager.connect(websocket, room_id, user.username, str(user.id))
 
-    # Load history (last 50 messages, oldest first)
+    # Load last 50 messages oldest-first so the client can render them in order
     hist_result = await db.execute(
         select(DirectMessage)
         .where(
@@ -186,10 +192,10 @@ async def dm_ws(
                 "created_at": msg.created_at.isoformat(),
             })
 
-            # Generate AI reply if the other participant is a digital member
+            # Generate an AI reply only when the other participant is a digital (AI) member
             if other_user.is_digital:
                 try:
-                    # Resolve all the real user's communities for context
+                    # Collect all communities the real user belongs to for location/context hints
                     comm_result = await db.execute(
                         select(Community)
                         .join(CommunityMembership, CommunityMembership.community_id == Community.id)
@@ -198,6 +204,7 @@ async def dm_ws(
                     user_communities = comm_result.scalars().all()
                     if user_communities:
                         community_name = ", ".join(c.name for c in user_communities)
+                        # Use single-community description/location only when unambiguous
                         community_description = user_communities[0].description if len(user_communities) == 1 else None
                         community_location = user_communities[0].location if len(user_communities) == 1 else None
                     else:
@@ -205,7 +212,7 @@ async def dm_ws(
                         community_description = None
                         community_location = None
 
-                    # Fetch recent DM history for context
+                    # Fetch recent DM history so the AI can maintain conversational continuity
                     ctx_result = await db.execute(
                         select(DirectMessage)
                         .where(
@@ -235,6 +242,7 @@ async def dm_ws(
 
                     await db.refresh(other_user)
                     chunks: list[str] = []
+                    # Send an empty stream_chunk first so the frontend can show a typing indicator
                     await dm_manager.broadcast(room_id, {
                         "type": "stream_chunk",
                         "sender_id": str(other_user.id),
@@ -254,6 +262,7 @@ async def dm_ws(
                             "sender_username": other_user.username,
                             "content": chunk,
                         })
+                    # Validate and persist the complete AI response
                     ai_text, _ = validate_output("".join(chunks), max_length=300)
                     ai_msg = DirectMessage(
                         sender_id=other_user.id,

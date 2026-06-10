@@ -6,11 +6,12 @@ from ..config import settings
 from .metrics import metrics
 from .prompts import MODERATION_SYSTEM
 
+# Haiku is used here instead of Sonnet for cost efficiency — moderation runs on every community message
 client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
 
 
 async def moderate_message(content: str) -> tuple[bool, str]:
-    """Returns (is_violation, reason)."""
+    """Returns (is_violation, reason). Reason is an empty string when there is no violation."""
     start = time.perf_counter()
     error = False
     try:
@@ -24,6 +25,7 @@ async def moderate_message(content: str) -> tuple[bool, str]:
         try:
             data = json.loads(text)
         except json.JSONDecodeError:
+            # Model occasionally wraps the JSON in markdown — extract the object directly
             match = re.search(r'\{.*\}', text, re.DOTALL)
             data = json.loads(match.group()) if match else {"violation": False, "reason": ""}
         return bool(data.get("violation", False)), str(data.get("reason", ""))

@@ -16,6 +16,7 @@ _pwd = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 
 def _create_token(user_id: UUID) -> str:
+    """Create a signed JWT with a 7-day expiry (controlled by settings.access_token_expire_minutes)."""
     expire = datetime.utcnow() + timedelta(minutes=settings.access_token_expire_minutes)
     return jwt.encode(
         {"sub": str(user_id), "exp": expire},
@@ -95,6 +96,10 @@ async def make_admin(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    """
+    Self-service admin elevation. The caller must know the ADMIN_SECRET from the server config.
+    This avoids the need to seed an admin account or use a database console on first deploy.
+    """
     if secret != settings.admin_secret:
         raise HTTPException(status_code=403, detail="Invalid admin secret")
     current_user.is_admin = True

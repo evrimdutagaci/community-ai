@@ -11,19 +11,26 @@ client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
 
 
 async def chat_onboarding(messages: list[dict], user_context: str = "") -> str:
+    """
+    Run a single conversational turn for the onboarding agent.
+    user_context is injected into the system prompt so the agent can answer factual questions
+    about the user (e.g. their current communities) without those facts appearing in the chat history.
+    """
     start = time.perf_counter()
     error = False
     try:
         system = ONBOARDING_SYSTEM
         if user_context:
+            # Append context as a separate section so it doesn't bleed into the persona instructions
             system = f"{ONBOARDING_SYSTEM}\n\nUser context (facts you can state directly if asked):\n{user_context}"
+        # Wrap all user messages in XML tags to prevent prompt injection from user content
         safe_messages = [
             {"role": m["role"], "content": wrap_user_content(m["content"]) if m["role"] == "user" else m["content"]}
             for m in messages
         ] if messages else [{"role": "user", "content": "hi"}]
         response = await client.messages.create(
             model="claude-sonnet-4-6",
-            max_tokens=150,
+            max_tokens=150,  # Kept tight — the prompt enforces 1-2 sentence replies
             system=system,
             messages=safe_messages,
         )
@@ -37,6 +44,7 @@ async def chat_onboarding(messages: list[dict], user_context: str = "") -> str:
 
 
 async def generate_profile(conversation: list[dict]) -> str:
+    """Extract a concise interest profile from the full onboarding conversation for semantic matching."""
     start = time.perf_counter()
     error = False
     try:
@@ -56,6 +64,11 @@ async def generate_profile(conversation: list[dict]) -> str:
 
 
 async def generate_community_name(profiles: list[str]) -> dict:
+    """
+    Generate a community name and description from a list of member profiles.
+    Returns a dict with keys: name, description, location (nullable).
+    Samples at most 5 profiles to keep the prompt focused.
+    """
     start = time.perf_counter()
     error = False
     try:
@@ -70,6 +83,7 @@ async def generate_community_name(profiles: list[str]) -> dict:
         try:
             return json.loads(text)
         except json.JSONDecodeError:
+            # Model occasionally wraps the JSON in markdown — extract the object directly
             match = re.search(r'\{.*\}', text, re.DOTALL)
             if match:
                 return json.loads(match.group())

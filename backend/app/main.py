@@ -16,6 +16,8 @@ logging.getLogger().setLevel(logging.INFO)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     async with engine.begin() as conn:
+        # Each ALTER TABLE is wrapped in IF NOT EXISTS so these are safe to run on every startup.
+        # This is intentional lightweight migration — avoids a full Alembic setup for a small schema.
         await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
         await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS is_digital BOOLEAN DEFAULT FALSE"))
         await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS is_admin BOOLEAN DEFAULT FALSE"))
@@ -24,27 +26,30 @@ async def lifespan(app: FastAPI):
         await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS is_banned BOOLEAN DEFAULT FALSE"))
         await conn.run_sync(Base.metadata.create_all)
 
-    # Pre-warm embedding model in background so first user isn't blocked
+    # Pre-warm the embedding model in a thread so the first user request isn't blocked by model load
     loop = asyncio.get_event_loop()
     loop.run_in_executor(None, _warm_embeddings)
 
-    # Backfill CommunityMembership for users that existed before this table was added
+    # Backfill CommunityMembership rows for users that existed before the multi-community feature
     await _backfill_memberships()
-    # Rename existing digital members to their community-specific personas
+    # Rename digital members to community-specific personas (handles deploys before unique naming was added)
     await _backfill_digital_member_names()
 
-    # Backfill theme_embedding for communities created before this feature
-    asyncio.create_task(_backfill_theme_embeddings())
-    # Backfill digital members for communities that lack them
-    asyncio.create_task(_backfill_digital_members())
-    # Daily announcement refresh loop
-    asyncio.create_task(_daily_announcements_loop())
+    # Background tasks — run concurrently throughout the application lifetime
+    asyncio.create_task(_backfill_theme_embeddings())   # Communities created before theme_embedding feature
+    asyncio.create_task(_backfill_digital_members())    # Communities missing digital members
+    asyncio.create_task(_daily_announcements_loop())    # Refresh event announcements every midnight
 
     yield
     await engine.dispose()
 
 
 async def _backfill_memberships():
+    """
+    Create CommunityMembership rows for legacy users.
+    Users created before the multi-community feature only have community_id set —
+    they need a corresponding membership row to appear in community member lists.
+    """
     from sqlalchemy import select
     from .database import AsyncSessionLocal
     from .models import User, CommunityMembership
@@ -71,7 +76,14 @@ def _warm_embeddings():
 
 
 async def _backfill_digital_member_names():
-    """Rename existing digital members so each community gets unique persona names."""
+    """
+    Rename digital members to community-specific personas.
+    Required for deployments that pre-date the unique-per-community naming scheme.
+
+    Two-phase rename is necessary to break circular rename conflicts without hitting
+    the unique constraint on username (e.g. aria.abc → aria.xyz when aria.xyz already exists).
+    Phase 1 moves everyone to collision-safe temp names, then Phase 2 assigns final names.
+    """
     from sqlalchemy import select
     from .database import AsyncSessionLocal
     from .models import Community, User
@@ -92,7 +104,7 @@ async def _backfill_digital_member_names():
             personas = _personas_for_community(community.id)
             target_names = [_username(p["key"], community.id) for p in personas]
 
-            # Skip if already correct
+            # Skip if already correct — avoids unnecessary DB writes on a clean deploy
             if all(m.username == t for m, t in zip(members, target_names)):
                 continue
 
@@ -113,6 +125,10 @@ async def _backfill_digital_member_names():
 
 
 async def _backfill_digital_members():
+    """
+    Ensure every community with fewer than 3 real members has digital members.
+    Handles communities created before the digital member feature was added.
+    """
     from sqlalchemy import select, func
     from .database import AsyncSessionLocal
     from .models import Community, User, CommunityMembership
@@ -128,7 +144,7 @@ async def _backfill_digital_members():
             )
             real_count = real_result.scalar() or 0
             if real_count >= 3:
-                continue
+                continue  # Enough real members — digital members not needed
             digital_result = await db.execute(
                 select(func.count(User.id)).where(
                     User.community_id == community.id,
@@ -141,7 +157,10 @@ async def _backfill_digital_members():
 
 
 async def _daily_announcements_loop():
-    """Refresh event announcements for all communities once per day at midnight."""
+    """
+    Refresh event announcements for all communities once per day at midnight.
+    Sleeps until the next midnight rather than using a fixed interval to avoid drift.
+    """
     from sqlalchemy import select
     from .database import AsyncSessionLocal
     from .models import Community
@@ -164,6 +183,10 @@ async def _daily_announcements_loop():
 
 
 async def _backfill_theme_embeddings():
+    """
+    Generate theme_embedding for communities created before this feature was added.
+    Runs once at startup as a background task.
+    """
     from sqlalchemy import select
     from .database import AsyncSessionLocal
     from .models import Community

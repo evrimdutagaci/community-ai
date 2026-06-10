@@ -1,8 +1,9 @@
 from datetime import datetime
 
-CANDIDATE_MEMBER_THRESHOLD = 5
-INACTIVE_DAYS = 30
-ARCHIVED_DAYS = 60
+# Status thresholds — days of inactivity before escalating to the next status
+CANDIDATE_MEMBER_THRESHOLD = 5   # Fewer than this many real members → CANDIDATE
+INACTIVE_DAYS = 30               # No messages for 30 days → INACTIVE
+ARCHIVED_DAYS = 60               # No messages for 60 days → ARCHIVED
 
 VALID_STATUSES = {"ACTIVE", "CANDIDATE", "INACTIVE", "ARCHIVED"}
 
@@ -12,6 +13,10 @@ def compute_status(
     real_member_count: int,
     status_override: str | None = None,
 ) -> str:
+    """
+    Derive the community lifecycle status.
+    Admin-set overrides always win; otherwise the status is computed from activity and size.
+    """
     if status_override and status_override in VALID_STATUSES:
         return status_override
 
@@ -22,6 +27,7 @@ def compute_status(
         if days >= INACTIVE_DAYS:
             return "INACTIVE"
 
+    # A community with very few real members is still forming — keep it as CANDIDATE
     if real_member_count < CANDIDATE_MEMBER_THRESHOLD:
         return "CANDIDATE"
 

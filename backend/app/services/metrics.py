@@ -14,10 +14,18 @@ class _AgentStats:
     _samples: list = field(default_factory=list)
 
 
+# Rolling window size for percentile calculations — unbounded history would grow forever
 _MAX_SAMPLES = 1000
 
 
 class MetricsStore:
+    """
+    Thread-safe in-memory metrics store.
+    threading.Lock is needed because record_call can be called from a thread executor
+    (e.g. the embedding model warm-up runs in a thread pool).
+    Each call is also asynchronously persisted to the DB for historical analysis.
+    """
+
     def __init__(self):
         self._lock = threading.Lock()
         self._agents: dict[str, _AgentStats] = defaultdict(_AgentStats)
@@ -38,8 +46,10 @@ class MetricsStore:
             s.tool_calls += tool_calls
             s.total_latency_ms += latency_ms
             s._samples.append(round(latency_ms, 1))
+            # Drop oldest samples once we exceed the rolling window
             if len(s._samples) > _MAX_SAMPLES:
                 s._samples = s._samples[-_MAX_SAMPLES:]
+        # Fire-and-forget DB write — metrics recording must never slow down the request path
         try:
             loop = asyncio.get_running_loop()
             loop.create_task(self._persist(agent, latency_ms, error, tool_calls))
@@ -62,6 +72,7 @@ class MetricsStore:
             pass
 
     def snapshot(self) -> dict:
+        """Return a point-in-time snapshot of all agent stats with percentile latencies."""
         with self._lock:
             agents: dict = {}
             for name, s in self._agents.items():

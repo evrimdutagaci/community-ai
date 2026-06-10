@@ -8,6 +8,7 @@ from .config import settings
 from .database import get_db
 from .models import User
 
+# tokenUrl tells the OpenAPI docs where to POST credentials for a token
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login")
 
 
@@ -15,6 +16,7 @@ async def get_current_user(
     token: str = Depends(oauth2_scheme),
     db: AsyncSession = Depends(get_db),
 ) -> User:
+    """Decode the JWT and return the matching User row, or raise 401."""
     exc = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Could not validate credentials",
@@ -36,6 +38,7 @@ async def get_current_user(
 
 
 async def get_admin_user(current_user: User = Depends(get_current_user)) -> User:
+    """Restrict a route to users who have been elevated to admin status."""
     if not current_user.is_admin:
         raise HTTPException(status_code=403, detail="Admin access required")
     return current_user

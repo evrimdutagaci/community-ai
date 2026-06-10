@@ -25,6 +25,7 @@ from .prompts import (
 
 client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
 
+# The full persona pool — 3 are picked per community deterministically
 PERSONAS = [
     {"key": "aria",  "persona": "Warm and curious. Loves asking thoughtful follow-up questions and connecting ideas across domains."},
     {"key": "leo",   "persona": "Direct and practical. Shares concrete examples, has a dry sense of humor, enjoys friendly pushback."},
@@ -39,7 +40,10 @@ PERSONAS = [
 
 
 def _personas_for_community(community_id) -> list[dict]:
-    """Deterministically pick 3 distinct personas for a community using its ID as a seed."""
+    """
+    Deterministically pick 3 distinct personas for a community using its ID as a seed.
+    MD5 of the UUID gives a stable integer seed — same community always gets the same 3 personas.
+    """
     seed = int(hashlib.md5(str(community_id).encode()).hexdigest(), 16)
     rng = random.Random(seed)
     pool = PERSONAS.copy()
@@ -48,22 +52,23 @@ def _personas_for_community(community_id) -> list[dict]:
 
 
 def display_name(user: User) -> str:
-    """Extract readable display name from a digital member's username."""
+    """Extract readable display name from a digital member's username (format: key.community_prefix)."""
     base = user.username.split(".")[0]
     return base.capitalize()
 
 
 def _username(persona_key: str, community_id) -> str:
+    # Include a community ID prefix so the same persona key maps to a unique username per community
     return f"{persona_key}.{str(community_id)[:8]}"
 
 
 async def ensure_digital_members(community: Community, db: AsyncSession) -> list[User]:
-    """Create 3 digital members for a newly created community."""
+    """Create 3 digital members for a newly created community if none exist yet."""
     result = await db.execute(
         select(User).where(User.community_id == community.id, User.is_digital.is_(True))
     )
     if result.scalars().all():
-        return []
+        return []  # Already have digital members — nothing to do
 
     members = []
     for p in _personas_for_community(community.id):
@@ -71,6 +76,8 @@ async def ensure_digital_members(community: Community, db: AsyncSession) -> list
         member = User(
             email=f"{uname}@digital.community.ai",
             username=uname,
+            # "!" is an invalid bcrypt hash — it can never match any real password,
+            # preventing accidental login as a digital member
             password_hash="!",
             is_digital=True,
             onboarding_complete=True,
@@ -102,11 +109,11 @@ async def get_real_member_count(community_id: str, db: AsyncSession) -> int:
 
 
 async def remove_digital_members(community_id: str, db: AsyncSession) -> list[str]:
-    """Detach digital members from the community. Returns their display names."""
+    """Detach digital members from the community when enough real members have joined. Returns their display names."""
     members = await get_digital_members(community_id, db)
-    names = [display_name(m) for m in members]  # Extract before commit expires objects
+    names = [display_name(m) for m in members]  # Capture names before commit expires the ORM objects
     for m in members:
-        m.community_id = None
+        m.community_id = None  # Detach rather than delete — preserves message history
     await db.commit()
     return names
 
@@ -138,8 +145,10 @@ async def generate_dm_response_stream(
             else "they are not currently in any community"
         )
 
+        # Tools are only available when a DB session and community list are provided
         has_tools = db is not None and bool(community_ids)
 
+        # Build system prompt from templates — base + conditional tools section + footer
         system = DIGITAL_MEMBER_DM_BASE.format(
             name=name,
             persona=persona["persona"],
@@ -174,6 +183,7 @@ async def generate_dm_response_stream(
         messages_payload = [{"role": "user", "content": user_content}]
         tools = (TOOL_SCHEMAS + EVENT_TOOL_SCHEMAS) if has_tools else EVENT_TOOL_SCHEMAS
 
+        # Agentic loop capped at 5 iterations to prevent runaway tool chains
         for _ in range(5):
             kwargs: dict = dict(model="claude-haiku-4-5-20251001", max_tokens=300, system=system, messages=messages_payload)
             if tools:
@@ -236,6 +246,7 @@ async def generate_response_stream(
         has_tools = db is not None and bool(community_ids)
         location_hint = f"'{community.location}'" if community.location else "the location implied by the community name"
 
+        # Build system prompt from templates — base + conditional tools section + footer
         system = DIGITAL_MEMBER_CHAT_BASE.format(
             name=name,
             persona=persona["persona"],
@@ -263,6 +274,7 @@ async def generate_response_stream(
         tools = (TOOL_SCHEMAS + EVENT_TOOL_SCHEMAS) if has_tools else []
         messages_payload = [{"role": "user", "content": user_content}]
 
+        # Agentic loop capped at 5 iterations to prevent runaway tool chains
         for _ in range(5):
             kwargs: dict = dict(
                 model="claude-haiku-4-5-20251001",

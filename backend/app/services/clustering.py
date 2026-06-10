@@ -12,7 +12,8 @@ from .agent import generate_community_name
 def _community_score(user_embedding: list[float], community: Community) -> float:
     """
     Blend centroid similarity (who's in it) with theme similarity (what it's about).
-    Falls back to centroid-only when theme_embedding is missing (legacy rows).
+    50/50 weighting keeps results aligned with both current members and the community's declared topic.
+    Falls back to centroid-only for legacy rows that pre-date theme_embedding.
     """
     if community.centroid is None:
         return -1.0
@@ -23,11 +24,13 @@ def _community_score(user_embedding: list[float], community: Community) -> float
     return 0.5 * centroid_sim + 0.5 * theme_sim
 
 
-RECOMMENDATION_THRESHOLD = 0.76  # Minimum blended similarity to suggest a community
+# Tuned to avoid noisy recommendations; below this the match isn't strong enough to suggest
+RECOMMENDATION_THRESHOLD = 0.76
+
 
 async def get_recommendations(embedding: list[float], db: AsyncSession, n: int = 3, user: User | None = None) -> list[dict]:
     """Return top-N communities above the similarity threshold, sorted by score."""
-    # Collect community IDs the user is banned from so we can exclude them
+    # Collect community IDs the user is banned from so we can exclude them from recommendations
     banned_ids: set = set()
     if user is not None:
         ban_result = await db.execute(
@@ -81,6 +84,7 @@ async def assign_to_community(user: User, community_id: str | None, db: AsyncSes
     user.community_id = community.id
     await _update_centroid(community, embedding, db)
 
+    # Upsert membership — joining a community you're already in should be a no-op
     existing_m = await db.execute(
         select(CommunityMembership).where(
             CommunityMembership.user_id == user.id,
@@ -92,6 +96,7 @@ async def assign_to_community(user: User, community_id: str | None, db: AsyncSes
 
     await db.commit()
 
+    # Trigger background re-cluster every N completed users to keep communities fresh
     count_result = await db.execute(
         select(func.count(User.id)).where(User.onboarding_complete.is_(True))
     )
@@ -102,7 +107,9 @@ async def assign_to_community(user: User, community_id: str | None, db: AsyncSes
     return community
 
 
+# Threshold above which we reuse an existing community rather than create a near-duplicate
 COMMUNITY_DEDUP_THRESHOLD = 0.88
+
 
 async def _create_community(user: User, embedding: list[float], db: AsyncSession) -> Community:
     # If an existing community is already a very strong match, join it instead of creating a duplicate
@@ -121,13 +128,14 @@ async def _create_community(user: User, embedding: list[float], db: AsyncSession
         theme_embedding=embed_text(theme_text),
     )
     db.add(community)
-    await db.flush()
+    await db.flush()  # Flush to get the community ID before creating digital members
     from .digital_members import ensure_digital_members
     await ensure_digital_members(community, db)
     return community
 
 
 async def _update_centroid(community: Community, new_embedding: list[float], db: AsyncSession):
+    """Update the community centroid using a running mean — avoids reloading all member embeddings."""
     result = await db.execute(
         select(func.count(CommunityMembership.user_id)).where(
             CommunityMembership.community_id == community.id
@@ -138,28 +146,32 @@ async def _update_centroid(community: Community, new_embedding: list[float], db:
     if n == 0 or community.centroid is None:
         community.centroid = new_embedding
     else:
+        # Incremental mean: (old_mean * n + new_value) / (n + 1)
         old = np.array(community.centroid, dtype=float)
         new = np.array(new_embedding, dtype=float)
         community.centroid = ((old * n + new) / (n + 1)).tolist()
 
 
 async def _recluster_background():
+    """Open a fresh DB session for the background re-cluster task (can't reuse the request session)."""
     from ..database import AsyncSessionLocal
     async with AsyncSessionLocal() as db:
         await recluster_all(db)
 
 
 async def recluster_all(db: AsyncSession):
-    """Re-run k-means over all users and reassign communities."""
+    """Re-run k-means over all users and reassign communities. Creates new Community rows; old ones are orphaned."""
     from sklearn.cluster import KMeans
 
     result = await db.execute(select(User).where(User.embedding.isnot(None)))
     users = result.scalars().all()
 
+    # Need at least 4 users for meaningful clusters
     if len(users) < 4:
         return
 
     embeddings = np.array([list(u.embedding) for u in users], dtype=float)
+    # Heuristic: ~3 users per cluster, capped at 10 to avoid too many tiny communities
     n_clusters = max(2, min(len(users) // 3, 10))
 
     kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
@@ -185,6 +197,7 @@ async def recluster_all(db: AsyncSession):
         await db.flush()
         new_communities[cluster_id] = community
 
+    # Reassign all users to their new cluster's community
     for user, label in zip(users, labels):
         user.community_id = new_communities[int(label)].id
 

@@ -25,12 +25,19 @@ router = APIRouter(tags=["websocket"])
 
 
 def _msg_display(username: str, is_digital: bool) -> str:
+    """Return the display name for a message author — strip the community suffix from digital member usernames."""
     if is_digital:
         return username.split(".")[0].capitalize()
     return username
 
 
 class ConnectionManager:
+    """
+    In-memory WebSocket room manager.
+    Rooms are keyed by community_id and hold (websocket, username, user_id) triples.
+    Note: this state is lost on restart — acceptable for development; use Redis in production for HA.
+    """
+
     def __init__(self):
         # room_id -> list of (websocket, username, user_id)
         self._rooms: dict[str, list[tuple[WebSocket, str, str]]] = {}
@@ -40,7 +47,7 @@ class ConnectionManager:
         self._rooms.setdefault(room_id, []).append((ws, username, user_id))
 
     def register(self, ws: WebSocket, room_id: str, username: str, user_id: str):
-        """Register a pre-accepted websocket."""
+        """Register a pre-accepted websocket (used when accept() is called before the manager)."""
         self._rooms.setdefault(room_id, []).append((ws, username, user_id))
 
     def disconnect(self, ws: WebSocket, room_id: str):
@@ -50,6 +57,7 @@ class ConnectionManager:
             ]
 
     async def broadcast(self, room_id: str, payload: dict):
+        """Broadcast to all sockets in a room; silently remove any that have disconnected."""
         dead = []
         for ws, username, user_id in self._rooms.get(room_id, []):
             try:
@@ -60,6 +68,7 @@ class ConnectionManager:
             self._rooms[room_id].remove(item)
 
     async def kick_user(self, room_id: str, user_id: str):
+        """Send a 'kicked' message and forcibly close all sockets for a given user in a room."""
         if room_id not in self._rooms:
             return
         to_kick = [(w, u, uid) for w, u, uid in self._rooms[room_id] if uid == user_id]
@@ -76,6 +85,7 @@ manager = ConnectionManager()
 
 
 async def _user_from_token(token: str, db: AsyncSession) -> User | None:
+    """Validate a JWT token passed as a WebSocket query parameter and return the user."""
     try:
         payload = jwt.decode(token, settings.secret_key, algorithms=[settings.algorithm])
         user_id: str | None = payload.get("sub")
@@ -88,6 +98,12 @@ async def _user_from_token(token: str, db: AsyncSession) -> User | None:
 
 
 # ── Onboarding WebSocket ──────────────────────────────────────────────────────
+# WebSocket close codes used in this file:
+#   4001 = unauthorized (bad/missing token)
+#   4002 = already onboarded
+#   4003 = not a member of the requested community
+#   4004 = target user not found
+#   4005 = globally banned
 
 @router.websocket("/ws/onboarding")
 async def onboarding_ws(
@@ -108,7 +124,7 @@ async def onboarding_ws(
         await websocket.close(code=4002)
         return
 
-    # Load conversation history
+    # Load existing conversation so the agent can continue mid-session
     hist_result = await db.execute(
         select(OnboardingMessage)
         .where(OnboardingMessage.user_id == user.id)
@@ -116,10 +132,11 @@ async def onboarding_ws(
     )
     history = [{"role": m.role, "content": m.content} for m in hist_result.scalars().all()]
 
-    # On reconnect: restore history and re-send last recommendations if profile exists
     profile_ready = user.profile_summary is not None and user.embedding is not None
 
-    # Build context so the agent can answer factual questions about the user
+    # Build a context string injected into the system prompt so the agent can answer
+    # factual questions about the user (existing communities, username) without those
+    # facts being part of the conversational history.
     mem_result = await db.execute(
         select(Community)
         .join(CommunityMembership, CommunityMembership.community_id == Community.id)
@@ -140,8 +157,10 @@ async def onboarding_ws(
         )
 
     if history:
+        # Reconnect — restore prior conversation so the user can see what was said
         await websocket.send_json({"type": "history", "messages": history})
     elif not profile_ready:
+        # First visit — send the opening greeting
         greeting = await chat_onboarding([], user_context)
         history.append({"role": "assistant", "content": greeting})
         db.add(OnboardingMessage(user_id=user.id, role="assistant", content=greeting))
@@ -149,19 +168,20 @@ async def onboarding_ws(
         await websocket.send_json({"type": "message", "role": "assistant", "content": greeting})
 
     if profile_ready:
+        # Profile already exists (e.g. reconnect mid-selection) — immediately send recommendations
         recommendations = await get_recommendations(list(user.embedding), db, user=user)
         await websocket.send_json({"type": "recommendations", "communities": recommendations})
 
-    # Single unified loop — handles chat messages AND community join selections
+    # Single unified loop — handles both chat messages and community join selections
     try:
         while True:
             raw = await websocket.receive_text()
             data = json.loads(raw)
 
-            # User chose a community
+            # User selected a community from the recommendation list
             if data.get("type") == "join" and profile_ready:
                 community_id = data.get("community_id")
-                # Check community-specific ban
+                # Check for a community-specific ban before allowing the join
                 if community_id:
                     ban_check = await db.execute(
                         select(CommunityBan).where(
@@ -213,7 +233,8 @@ async def onboarding_ws(
 
             await websocket.send_json({"type": "message", "role": "assistant", "content": ai_reply})
 
-            # Once enough turns, refresh profile + recommendations after every message
+            # Generate/update profile once the minimum number of turns is reached,
+            # then keep updating it so recommendations improve as the conversation continues.
             if user_turns >= settings.min_messages_for_profile:
                 profile = await generate_profile(history)
                 user.profile_summary = profile
@@ -242,6 +263,7 @@ async def community_ws(
     if not user:
         await websocket.close(code=4001)
         return
+    # Require a valid membership row before admitting the connection
     membership_check = await db.execute(
         select(CommunityMembership).where(
             CommunityMembership.user_id == user.id,
@@ -254,11 +276,11 @@ async def community_ws(
 
     manager.register(websocket, community_id, user.username, str(user.id))
 
-    # Fetch community object for digital member responses
+    # Fetch community object once; refreshed as needed before digital member calls
     community_result = await db.execute(select(Community).where(Community.id == UUID(community_id)))
     community = community_result.scalar_one_or_none()
 
-    # Send message history
+    # Send the last 50 messages as history so the user sees context immediately on connect
     hist_result = await db.execute(
         select(CommunityMessage, User.username, User.is_digital)
         .join(User, CommunityMessage.user_id == User.id)
@@ -286,12 +308,11 @@ async def community_ws(
         "content": f"{user.username} joined the community",
     })
 
-    # Digital member lifecycle checks on join
+    # Digital member lifecycle: retire AI members once 3+ real members have joined
     real_count = await get_real_member_count(community_id, db)
     digital_members = await get_digital_members(community_id, db)
 
     if real_count >= 3 and digital_members:
-        # Community has grown — retire digital members
         removed_names = await remove_digital_members(community_id, db)
         for name in removed_names:
             await manager.broadcast(community_id, {
@@ -299,7 +320,7 @@ async def community_ws(
                 "content": f"{name} (AI member) has left — your community now has enough real members!",
             })
     elif digital_members and not history_rows and community:
-        # Brand-new community — send welcome from 1–2 digital members
+        # Brand-new community with no messages — send welcome from 1-2 digital members
         try:
             welcomers = random.sample(digital_members, min(2, len(digital_members)))
             for dm in welcomers:
@@ -347,6 +368,7 @@ async def community_ws(
                 await websocket.send_json({"type": "system", "content": "⏱ You're sending messages too quickly. Please wait a moment."})
                 continue
 
+            # Prompt injection / jailbreak check before any AI sees the content
             if is_suspicious(content):
                 warn_result = await db.execute(
                     select(CommunityWarning).where(
@@ -367,6 +389,7 @@ async def community_ws(
                     "warning_number": record.count,
                     "content": f"⚠️ Moderator warning {record.count}/3 to {user.username}: message flagged for policy violation.",
                 })
+                # 3 violations = auto-ban from this community; 2+ community bans = global platform ban
                 if record.count >= 3:
                     try:
                         db.add(CommunityBan(user_id=user.id, community_id=UUID(community_id)))
@@ -377,7 +400,7 @@ async def community_ws(
                         select(func.count(CommunityBan.id)).where(CommunityBan.user_id == user.id)
                     )).scalar() or 0
                     if ban_count >= 2:
-                        user.is_banned = True
+                        user.is_banned = True  # Global ban after being removed from 2+ communities
                     await db.execute(sql_delete(CommunityMembership).where(
                         CommunityMembership.user_id == user.id,
                         CommunityMembership.community_id == UUID(community_id),
@@ -419,10 +442,10 @@ async def community_ws(
                 "created_at": msg.created_at.isoformat(),
             })
 
-            # AI moderation
+            # AI moderation runs after the message is broadcast so it feels instant to the sender;
+            # the message is deleted and a warning issued if the moderator flags it.
             is_violation, reason = await moderate_message(content)
             if is_violation:
-                # Remove the offending message
                 await db.execute(sql_delete(CommunityMessage).where(CommunityMessage.id == msg.id))
                 await db.commit()
                 await manager.broadcast(community_id, {"type": "delete", "id": str(msg.id)})
@@ -440,28 +463,26 @@ async def community_ws(
                 await db.commit()
 
                 if record.count >= 3:
-                    # Permanently ban from this community
+                    # Auto-ban from this community
                     try:
                         db.add(CommunityBan(user_id=user.id, community_id=UUID(community_id)))
                         await db.flush()
                     except Exception:
-                        pass  # upsert safety — already banned
+                        pass  # Unique constraint hit — already banned; safe to ignore
 
-                    # Count total community bans to decide global ban
+                    # Global ban if the user has been kicked from 2+ communities
                     ban_count = (await db.execute(
                         select(func.count(CommunityBan.id)).where(CommunityBan.user_id == user.id)
                     )).scalar() or 0
                     if ban_count >= 2:
                         user.is_banned = True
 
-                    # Remove membership for this community
                     await db.execute(
                         sql_delete(CommunityMembership).where(
                             CommunityMembership.user_id == user.id,
                             CommunityMembership.community_id == UUID(community_id),
                         )
                     )
-                    # Check remaining memberships
                     remaining = await db.execute(
                         select(CommunityMembership).where(CommunityMembership.user_id == user.id)
                     )
@@ -490,13 +511,13 @@ async def community_ws(
                         "content": f"⚠️ Moderator warning {record.count}/3 to {user.username}: {reason}",
                     })
 
-            # Digital member reply when community still needs them
+            # Trigger a digital member reply if the community still needs them (< 3 real members)
             try:
                 current_real_count = await get_real_member_count(community_id, db)
                 if current_real_count < 3 and community:
                     current_digital = await get_digital_members(community_id, db)
                     if current_digital:
-                        # Honour @Name mentions — find the tagged digital member
+                        # Honour @Name mentions — direct the reply to the tagged digital member
                         mentioned = next(
                             (
                                 dm for dm in current_digital
@@ -504,6 +525,7 @@ async def community_ws(
                             ),
                             None,
                         )
+                        # Fall back to a random digital member when no one is @mentioned
                         responder = mentioned if mentioned else random.choice(current_digital)
                         ctx_result = await db.execute(
                             select(CommunityMessage, User.username, User.is_digital)
@@ -551,6 +573,7 @@ async def community_ws(
 
     except WebSocketDisconnect:
         manager.disconnect(websocket, community_id)
+        # Only broadcast the departure if the user is still a member (they may have been kicked)
         still_member = await db.execute(
             select(CommunityMembership).where(
                 CommunityMembership.user_id == user.id,
