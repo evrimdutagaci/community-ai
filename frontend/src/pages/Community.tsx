@@ -29,11 +29,13 @@ interface DMUser {
   username: string
 }
 
+// Match ws/wss to the page protocol so the connection works on both HTTP (dev) and HTTPS (prod)
 function wsUrl(path: string) {
   const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
   return `${proto}//${window.location.host}${path}`
 }
 
+// Digital member usernames are stored as "aria.abc123" — strip the community suffix and capitalize
 function digitalName(username: string): string {
   const base = username.split('.')[0]
   return base.charAt(0).toUpperCase() + base.slice(1)
@@ -69,11 +71,14 @@ function Avatar({ name, size = 'md', isDigital = false }: { name: string; size?:
   )
 }
 
+// Highlight @mentions in community chat; self-mentions get a distinct yellow highlight
+// so users notice when someone is addressing them specifically
 function renderContent(content: string, members: Member[], currentUserId?: string): React.ReactNode {
   const parts = content.split(/(@\w+)/g)
   return parts.map((part, i) => {
     if (!part.startsWith('@')) return part
     const name = part.slice(1).toLowerCase()
+    // Match against both display name (for digital members) and raw username
     const isMention = members.some(
       (m) => memberDisplayName(m).toLowerCase() === name || m.username.toLowerCase() === name
     )
@@ -92,16 +97,21 @@ function renderContent(content: string, members: Member[], currentUserId?: strin
   })
 }
 
+// Module-level regex with the global flag — must reset lastIndex before each call
+// because /g regexes retain state between exec() calls in JS
 const URL_RE = /https?:\/\/[^\s]+/g
 
 function renderDmContent(content: string): React.ReactNode {
   const segments: React.ReactNode[] = []
   let last = 0
   let match: RegExpExecArray | null
-  URL_RE.lastIndex = 0
+  URL_RE.lastIndex = 0  // reset stale state from previous call
   while ((match = URL_RE.exec(content)) !== null) {
     if (match.index > last) segments.push(content.slice(last, match.index))
+    // Strip trailing punctuation that is unlikely to be part of the URL itself
     const url = match[0].replace(/[.,)]+$/, '')
+    // Google Calendar links get special treatment: shown as a call-to-action button rather
+    // than the raw URL, because AI digital members often share "add to calendar" links
     const isCalendar = url.includes('calendar.google.com')
     segments.push(
       <a
@@ -159,11 +169,12 @@ export default function Community() {
   const { token, user, logout, setUser } = useAuthStore()
   const navigate = useNavigate()
 
-  // Load community list on mount
+  // Load community list on mount; default to the last-joined community (most recently active)
   useEffect(() => {
     if (!user?.community_id) { navigate('/onboarding'); return }
     api.myCommunities().then((list) => {
       setCommunities(list)
+      // memberships are returned oldest-first; last entry is the most recently joined community
       if (list.length > 0) setActiveCommunityId(list[list.length - 1].id)
     }).catch(() => navigate('/onboarding'))
   }, [])
@@ -206,6 +217,8 @@ export default function Community() {
         return
       }
       if (data.type === 'stream_chunk') {
+        // Use a synthetic temp ID while the AI response is still streaming so chunks
+        // accumulate into a single bubble; stream_end below replaces it with the final message
         const streamId = `streaming_${data.user_id}`
         setEvents(prev => {
           const idx = prev.findIndex(ev => ev.id === streamId)
@@ -219,6 +232,7 @@ export default function Community() {
         return
       }
       if (data.type === 'stream_end') {
+        // Replace the temp streaming bubble with the persisted message (now has a real DB id)
         setEvents(prev => prev.map(ev =>
           ev.id === `streaming_${data.user_id}` ? { ...data, type: 'message' } : ev
         ))
@@ -230,7 +244,8 @@ export default function Community() {
     return () => ws.close()
   }, [activeCommunityId, token])
 
-  // DM WebSocket
+  // DM WebSocket — depends on dmUser?.id not the object reference; avoids reconnecting
+  // whenever the parent re-renders while the same DM is open
   useEffect(() => {
     if (!dmUser || !token) return
     setDmEvents([])
@@ -241,6 +256,7 @@ export default function Community() {
     ws.onmessage = (e) => {
       const data: ChatEvent = JSON.parse(e.data)
       if (data.type === 'history') { setDmEvents(data.messages ?? []); return }
+      // Same streaming pattern as community chat: accumulate chunks then replace with final
       if (data.type === 'stream_chunk') {
         const streamId = `streaming_${data.sender_id}`
         setDmEvents(prev => {

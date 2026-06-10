@@ -21,6 +21,7 @@ export default function Register() {
       setToken(access_token)
       const user = await api.me()
       setUser(user)
+      // New users are never onboarded yet — always redirect to onboarding flow
       navigate('/onboarding')
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Registration failed')

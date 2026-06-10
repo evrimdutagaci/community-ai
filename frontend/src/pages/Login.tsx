@@ -18,6 +18,7 @@ export default function Login() {
     try {
       const { access_token } = await api.login({ email, password })
       setToken(access_token)
+      // Fetch full user object after login — the token alone doesn't tell us onboarding status
       const user = await api.me()
       setUser(user)
       navigate(user.is_admin ? '/admin' : user.onboarding_complete ? '/community' : '/onboarding')

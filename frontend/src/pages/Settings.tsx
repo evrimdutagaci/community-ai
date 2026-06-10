@@ -61,6 +61,8 @@ export default function Settings() {
     }
   }
 
+  // Each handler calls both the store setter (persists to localStorage) and applySettings
+  // directly so the UI updates immediately without waiting for a re-render from the store
   function handleTheme(t: Theme) {
     setTheme(t)
     applySettings(t, accent, density)

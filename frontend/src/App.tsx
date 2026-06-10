@@ -19,6 +19,7 @@ function RequireAuth({ children }: { children: React.ReactNode }) {
 function HomeRedirect() {
   const { token, user } = useAuthStore()
   if (!token) return <Navigate to="/login" replace />
+  // Admin check comes before onboarding_complete because admins bypass onboarding
   if (user?.is_admin) return <Navigate to="/admin" replace />
   if (!user?.onboarding_complete) return <Navigate to="/onboarding" replace />
   return <Navigate to="/community" replace />
@@ -28,12 +29,13 @@ export default function App() {
   const { token, setUser, logout } = useAuthStore()
   const { theme, accent, density } = useSettingsStore()
 
-  // Apply persisted appearance settings on every mount
+  // Re-apply classes whenever settings change so Tailwind variants stay in sync
   useEffect(() => {
     applySettings(theme, accent, density)
   }, [theme, accent, density])
 
-  // Refresh user on mount to pick up changes since last session
+  // Refresh user on mount: the localStorage snapshot can be stale if the server
+  // updated onboarding_complete or is_admin since last visit. 401 → clear token.
   useEffect(() => {
     if (token) {
       api.me().then(setUser).catch(() => logout())

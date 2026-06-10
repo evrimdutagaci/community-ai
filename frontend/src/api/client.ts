@@ -1,6 +1,7 @@
 import { useAuthStore, type User } from '../store/auth'
 
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
+  // getState() instead of a hook because request() is called outside the React render cycle
   const token = useAuthStore.getState().token
   const res = await fetch(`/api${path}`, {
     ...options,
@@ -11,6 +12,7 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
     },
   })
   if (!res.ok) {
+    // fallback to statusText when the server returns a non-JSON error body (e.g. 502 from nginx)
     const err = await res.json().catch(() => ({ detail: res.statusText }))
     throw new Error(err.detail || 'Request failed')
   }

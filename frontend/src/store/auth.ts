@@ -18,6 +18,8 @@ interface AuthState {
   logout: () => void
 }
 
+// persist saves token + user to localStorage under the key 'auth' so the session
+// survives a page reload and WebSocket connections can be re-authenticated immediately
 export const useAuthStore = create<AuthState>()(
   persist(
     (set) => ({

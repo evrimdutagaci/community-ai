@@ -22,6 +22,7 @@ const STATUS_LABEL: Partial<Record<CommunityStatus, { label: string; cls: string
   ARCHIVED:  { label: 'Archived', cls: 'bg-gray-100 text-gray-500' },
 }
 
+// Match ws/wss to the page protocol so the connection works on both HTTP (dev) and HTTPS (prod)
 function wsUrl(path: string) {
   const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
   return `${proto}//${window.location.host}${path}`
@@ -39,6 +40,8 @@ export default function Onboarding() {
   const { token, user, setUser } = useAuthStore()
   const navigate = useNavigate()
 
+  // hasCommunity is true when the user is searching for an additional community while already
+  // being a member of at least one — the sidebar only renders in this secondary-search mode
   const hasCommunity = !!user?.community_id
 
   useEffect(() => {
@@ -69,6 +72,7 @@ export default function Onboarding() {
       if (data.type === 'onboarding_complete') {
         setFinishing(true)
         setRecommendations(null)
+        // Brief delay so the "Joining…" indicator is visible before navigating
         setTimeout(async () => {
           const u = await api.me()
           setUser(u)
@@ -84,6 +88,8 @@ export default function Onboarding() {
 
     ws.onclose = (e) => {
       setConnected(false)
+      // Close code 4002 means the server detected the user is already onboarded —
+      // redirect without re-running the onboarding flow
       if (e.code === 4002) {
         api.me().then((u) => { setUser(u); navigate('/community') })
       }
@@ -103,6 +109,7 @@ export default function Onboarding() {
     setInput('')
   }
 
+  // communityId === null signals the backend to create a brand-new community for the user
   function joinCommunity(communityId: string | null) {
     if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return
     wsRef.current.send(JSON.stringify({ type: 'join', community_id: communityId }))

@@ -14,6 +14,7 @@ interface SettingsState {
   setDensity: (d: Density) => void
 }
 
+// Separate localStorage key from auth store so settings survive a logout without resetting appearance
 export const useSettingsStore = create<SettingsState>()(
   persist(
     (set) => ({
@@ -28,17 +29,17 @@ export const useSettingsStore = create<SettingsState>()(
   )
 )
 
+// Imperatively mutates <html> class list so Tailwind's dark: and custom accent/density
+// variants take effect without a full re-render
 export function applySettings(theme: Theme, accent: Accent, density: Density) {
   const root = document.documentElement
 
-  // Theme
   root.classList.toggle('dark', theme === 'dark')
 
-  // Accent — remove all, add current
+  // Blue is the CSS default so it needs no class; only non-blue accents add a class
   root.classList.remove('accent-purple', 'accent-green', 'accent-orange', 'accent-rose')
   if (accent !== 'blue') root.classList.add(`accent-${accent}`)
 
-  // Density
   root.classList.remove('density-compact', 'density-normal', 'density-comfortable')
   root.classList.add(`density-${density}`)
 }
